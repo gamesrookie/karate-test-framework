@@ -1,0 +1,20 @@
+05:10:47.613 [com.intuit.karate.cli.Main.main()]  INFO  com.intuit.karate - Karate version: 1.4.0
+05:10:47.777 [com.intuit.karate.cli.Main.main()]  DEBUG com.intuit.karate.Suite - [config] classpath:karate-config.js
+05:10:47.789 [com.intuit.karate.cli.Main.main()]  INFO  c.intuit.karate.core.FeatureRuntime - found scenario at line: 7
+05:10:48.410 [com.intuit.karate.cli.Main.main()]  DEBUG com.intuit.karate - request:
+1 > POST http://localhost:8080/api/v1/orders/ORD-1/cancel
+1 > Content-Type: application/json; charset=UTF-8
+1 > Content-Length: 91
+1 > Host: localhost:8080
+1 > Connection: Keep-Alive
+1 > User-Agent: Apache-HttpClient/4.5.14 (Java/17.0.8)
+1 > Accept-Encoding: gzip,deflate
+{"lineItems":["ITEM-1"],"cancellationReason":"Changed mind","requestedBy":"user@email.com"}
+
+05:10:48.435 [com.intuit.karate.cli.Main.main()]  ERROR com.intuit.karate - org.apache.http.conn.HttpHostConnectException: Connect to localhost:8080 [localhost/127.0.0.1, localhost/0:0:0:0:0:0:0:1] failed: Connection refused, http call failed after 123 milliseconds for url: http://localhost:8080/api/v1/orders/ORD-1/cancel
+05:10:48.436 [com.intuit.karate.cli.Main.main()]  ERROR com.intuit.karate - src/test/java/features/order-cancellation.feature:17
+When method post
+http call failed after 123 milliseconds for url: http://localhost:8080/api/v1/orders/ORD-1/cancel
+org.apache.http.conn.HttpHostConnectException: Connect to localhost:8080 [localhost/127.0.0.1, localhost/0:0:0:0:0:0:0:1] failed: Connection refused
+src/test/java/features/order-cancellation.feature:17
+05:10:48.729 [com.intuit.karate.cli.Main.main()]  INFO  com.intuit.karate.Suite - <<fail>> feature 1 of 1 (0 remaining) src/test/java/features/order-cancellation.feature
