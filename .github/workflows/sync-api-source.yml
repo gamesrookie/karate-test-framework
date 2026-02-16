@@ -1,0 +1,316 @@
+# ============================================================================
+# Workflow: Auto-Sync API Source Code
+# ============================================================================
+# Purpose: Automatically updates the api-source/ submodule when the API repo
+#          changes, ensuring we always have the latest API code available
+#          for Copilot agents to read.
+#
+# Trigger: 
+#   1. Webhook from API repo when code is pushed
+#   2. Scheduled backup (every 6 hours)
+#   3. Manual trigger
+#
+# What it does:
+#   1. Updates api-source/ submodule to latest develop branch
+#   2. Checks for changes in critical files (cancellation/modification)
+#   3. Creates GitHub issue if critical changes detected
+#   4. Commits submodule update to this repo
+# ============================================================================
+
+name: Auto-Sync API Source Code
+
+on:
+  # ----------------------------------------------------------------------
+  # Trigger 1: Webhook from API repo
+  # ----------------------------------------------------------------------
+  # The API repo sends a "repository_dispatch" event when code is pushed
+  repository_dispatch:
+    types: [api-code-updated]
+  
+  # ----------------------------------------------------------------------
+  # Trigger 2: Manual trigger (click "Run workflow" in GitHub Actions UI)
+  # ----------------------------------------------------------------------
+  workflow_dispatch:
+  
+  # ----------------------------------------------------------------------
+  # Trigger 3: Scheduled backup (runs every 6 hours as safety net)
+  # ----------------------------------------------------------------------
+  # Cron syntax: minute hour day month day-of-week
+  # */6 = every 6 hours
+  schedule:
+    - cron: '0 */6 * * *'
+
+jobs:
+  sync-api-source:
+    runs-on: ubuntu-latest
+    
+    steps:
+      # ========================================================================
+      # STEP 1: Checkout this repo with submodules
+      # ========================================================================
+      # We need to checkout the entire repo including the api-source submodule
+      - name: Checkout Karate Repo with Submodules
+        uses: actions/checkout@v3
+        with:
+          # Use GITHUB_TOKEN to authenticate
+          token: ${{ secrets.GITHUB_TOKEN }}
+          # Recursively checkout submodules
+          submodules: recursive
+          # Fetch all history (needed for git operations)
+          fetch-depth: 0
+      
+      # ========================================================================
+      # STEP 2: Configure Git identity for commits
+      # ========================================================================
+      # GitHub Actions needs to know who to attribute commits to
+      - name: Configure Git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          
+          echo "✅ Git configured"
+      
+      # ========================================================================
+      # STEP 3: Update the API submodule to latest
+      # ========================================================================
+      # This step fetches the latest code from the API repo's develop branch
+      - name: Update API Submodule
+        id: update
+        run: |
+          echo "🔄 Updating api-source/ submodule..."
+          
+          # Navigate into the submodule directory
+          cd api-source
+          
+          # Fetch the latest code from the API repo
+          echo "Fetching from origin..."
+          git fetch origin develop
+          
+          # Get the commit SHA before update
+          BEFORE=$(git rev-parse HEAD)
+          # Get the commit SHA of the latest develop branch
+          AFTER=$(git rev-parse origin/develop)
+          
+          echo "📍 Current commit: $BEFORE"
+          echo "📍 Latest commit:  $AFTER"
+          
+          # Store these for use in later steps
+          echo "before=$BEFORE" >> $GITHUB_OUTPUT
+          echo "after=$AFTER" >> $GITHUB_OUTPUT
+          
+          # --------------------------------------------------------------
+          # Check if there are actually any changes
+          # --------------------------------------------------------------
+          if [ "$BEFORE" != "$AFTER" ]; then
+            echo "has_changes=true" >> $GITHUB_OUTPUT
+            echo "✅ Changes detected"
+            
+            # Get list of changed files
+            echo "Getting changed files..."
+            CHANGED_FILES=$(git diff --name-only $BEFORE $AFTER | \
+                           grep -E "(controller|service|dto|Controller|Service|Request|Response)" || \
+                           echo "")
+            
+            # Store changed files for later steps
+            echo "changed_files<<EOF" >> $GITHUB_OUTPUT
+            echo "$CHANGED_FILES" >> $GITHUB_OUTPUT
+            echo "EOF" >> $GITHUB_OUTPUT
+            
+            # Get commit messages between old and new
+            echo "Getting commit messages..."
+            COMMITS=$(git log --oneline $BEFORE..$AFTER | head -5)
+            echo "commits<<EOF" >> $GITHUB_OUTPUT
+            echo "$COMMITS" >> $GITHUB_OUTPUT
+            echo "EOF" >> $GITHUB_OUTPUT
+            
+            # Pull the latest changes
+            echo "Pulling latest changes..."
+            git pull origin develop
+            
+            echo "✅ Submodule updated successfully"
+          else
+            echo "has_changes=false" >> $GITHUB_OUTPUT
+            echo "ℹ️  Already up to date - no changes"
+          fi
+          
+          # Return to parent directory
+          cd ..
+      
+      # ========================================================================
+      # STEP 4: Analyze if changes are critical
+      # ========================================================================
+      # Critical = changes to cancellation or modification features
+      - name: Analyze Changes
+        if: steps.update.outputs.has_changes == 'true'
+        id: analyze
+        run: |
+          cd api-source
+          
+          echo "🔍 Analyzing changes for critical impact..."
+          
+          # Check if any changed files relate to cancellation/modification
+          CRITICAL_FILES=$(echo "${{ steps.update.outputs.changed_files }}" | \
+                          grep -i "cancellation\|modification" || \
+                          echo "")
+          
+          if [ -n "$CRITICAL_FILES" ]; then
+            echo "critical_changes=true" >> $GITHUB_OUTPUT
+            echo "🚨 CRITICAL CHANGES DETECTED"
+            echo "Files:"
+            echo "$CRITICAL_FILES"
+          else
+            echo "critical_changes=false" >> $GITHUB_OUTPUT
+            echo "ℹ️  Non-critical changes"
+          fi
+          
+          cd ..
+      
+      # ========================================================================
+      # STEP 5: Commit the submodule update
+      # ========================================================================
+      # The submodule pointer needs to be committed to track the new version
+      - name: Commit Submodule Update
+        if: steps.update.outputs.has_changes == 'true'
+        run: |
+          echo "💾 Committing submodule update..."
+          
+          # Stage the submodule change
+          git add api-source
+          
+          # Create detailed commit message
+          COMMIT_SHORT="${{ steps.update.outputs.after }}"
+          COMMIT_SHORT="${COMMIT_SHORT:0:7}"
+          
+          cat > /tmp/commit-msg << 'EOF'
+          Update API source to ${{ steps.update.outputs.after }}
+          
+          Changed files:
+          ${{ steps.update.outputs.changed_files }}
+          
+          Recent commits:
+          ${{ steps.update.outputs.commits }}
+          EOF
+          
+          # Commit with the message
+          git commit -F /tmp/commit-msg
+          
+          # Push the commit
+          git push
+          
+          echo "✅ Submodule update committed and pushed"
+      
+      # ========================================================================
+      # STEP 6: Create GitHub issue for critical changes
+      # ========================================================================
+      # If critical code changed, create an issue to alert the QA team
+      - name: Create GitHub Issue for Changes
+        if: steps.update.outputs.has_changes == 'true'
+        uses: actions/github-script@v6
+        with:
+          script: |
+            // Determine if this is a critical change
+            const isCritical = '${{ steps.analyze.outputs.critical_changes }}' === 'true';
+            
+            // Get change details
+            const changedFiles = `${{ steps.update.outputs.changed_files }}`;
+            const commits = `${{ steps.update.outputs.commits }}`;
+            const beforeCommit = '${{ steps.update.outputs.before }}'.substring(0, 7);
+            const afterCommit = '${{ steps.update.outputs.after }}'.substring(0, 7);
+            
+            // Create detailed issue body
+            const issueBody = `
+            # ${isCritical ? '🚨 CRITICAL - ' : 'ℹ️ '} API Source Code Updated
+            
+            ${isCritical ? '**Cancellation/Modification code has changed**' : '**API code has been updated**'}
+            
+            ## Change Summary
+            
+            **Previous Commit:** [\`${beforeCommit}\`](https://github.com/your-org/spring-boot-ecommerce-api/commit/${{ steps.update.outputs.before }})
+            **New Commit:** [\`${afterCommit}\`](https://github.com/your-org/spring-boot-ecommerce-api/commit/${{ steps.update.outputs.after }})
+            **Branch:** develop
+            
+            ## Changed Files
+            
+            \`\`\`
+            ${changedFiles || 'No controller/service/dto changes'}
+            \`\`\`
+            
+            ## Recent Commits
+            
+            \`\`\`
+            ${commits}
+            \`\`\`
+            
+            ## API Source Access
+            
+            The full API source code is now available in this repository at \`api-source/\`:
+            
+            \`\`\`bash
+            # View the updated API code locally
+            cd api-source
+            
+            # See what changed
+            git diff ${beforeCommit} ${afterCommit}
+            
+            # View specific files
+            cat src/main/java/com/ecommerce/controller/OrderCancellationController.java
+            \`\`\`
+            
+            ## 🤖 Next Steps - Use Copilot Agents
+            
+            ### Step 1: Read the Actual Code
+            \`\`\`
+            @api-code-reader: Read the changed files in api-source/ and explain what's different
+            \`\`\`
+            
+            **Files to read:**
+            ${changedFiles.split('\n').map(f => f ? `- \`api-source/${f}\`` : '').filter(Boolean).join('\n')}
+            
+            ### Step 2: Analyze Impact on Tests
+            \`\`\`
+            @api-sync-agent: Based on the code analysis above, which Karate tests are affected?
+            \`\`\`
+            
+            ### Step 3: Update Tests if Needed
+            \`\`\`
+            @qa-planner: Create test plan for these changes
+            
+            @test-generator: Update Karate tests based on the plan
+            
+            @qa-executor: Run affected tests
+            \`\`\`
+            
+            ## 📋 Checklist
+            
+            - [ ] Read changed code in \`api-source/\`
+            - [ ] Analyze impact on Karate tests
+            - [ ] Update affected test files
+            - [ ] Run regression tests
+            - [ ] Verify coverage is complete
+            
+            ## 🔗 Quick Links
+            
+            - [API Repo Compare](https://github.com/your-org/spring-boot-ecommerce-api/compare/${beforeCommit}...${afterCommit})
+            - [API Source in This Repo](../tree/main/api-source)
+            - [Karate Tests](../tree/main/src/test/java/features)
+            
+            ---
+            
+            *This issue was automatically created by the API Source Sync workflow.*
+            `;
+            
+            // Determine appropriate labels
+            const labels = isCritical 
+              ? ['api-change', 'critical', 'auto-generated', 'needs-test-update']
+              : ['api-change', 'auto-generated', 'needs-review'];
+            
+            // Create the issue
+            const issue = await github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title: `[API Update] ${isCritical ? '🚨 CRITICAL - ' : ''}API Source Updated (${afterCommit})`,
+              body: issueBody,
+              labels: labels
+            });
+            
+            console.log(`✅ Created issue: ${issue.data.html_url}`);
